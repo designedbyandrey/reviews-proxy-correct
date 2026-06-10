@@ -89,7 +89,7 @@ export default async function handler(req, res) {
         name: review.author_title,
         body: `"${review.review_text}"`,
         date: new Date(review.review_datetime_utc).toISOString(),
-        'author-image-2': review.author_image || '',
+        'author-image': review.author_image || '',
         rating: review.review_rating,
         'google-link': review.review_link || review.author_url || '',
         stars: generateStars(review.review_rating),
