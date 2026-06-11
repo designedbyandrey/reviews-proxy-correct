@@ -2,7 +2,7 @@ export const config = {
   maxDuration: 60,
 };
 
-const VERSION = 'v4-reliable-dedup';
+const VERSION = 'v5-credit-safe';
 
 export default async function handler(req, res) {
   if (req.headers['authorization'] !== `Bearer ${process.env.CRON_SECRET}`) {
@@ -17,8 +17,11 @@ export default async function handler(req, res) {
   const TIME_BUDGET_MS = 50000;
   const PAGE = 30;
 
-  let skip = parseInt(req.query.skip || '0', 10);
+  // HARD safety ceiling on how many reviews we'll ever fetch. Protects credits.
+  // Default 400 covers this client's ~122 with margin. Override per call with ?maxSkip=.
+  const HARD_CAP = parseInt(req.query.maxSkip || '400', 10);
 
+  let skip = parseInt(req.query.skip || '0', 10);
   const timeUp = () => Date.now() - startTime > TIME_BUDGET_MS;
 
   function generateStars(rating) {
@@ -26,7 +29,6 @@ export default async function handler(req, res) {
     return '★'.repeat(filled) + '☆'.repeat(5 - filled);
   }
 
-  // Canonical lowercase slug — must match exactly what Webflow stores, or dedup fails
   function makeSlug(review) {
     return (review.author_title + '-' + review.review_id)
       .toLowerCase()
@@ -34,7 +36,6 @@ export default async function handler(req, res) {
       .replace(/^-+|-+$/g, '');
   }
 
-  // fetch wrapper that backs off on Webflow 429 rate limits
   async function wf(url, options) {
     while (true) {
       const r = await fetch(url, options);
@@ -47,8 +48,7 @@ export default async function handler(req, res) {
     }
   }
 
-  // 1. Read existing slugs from the STAGED view (/items) — immediately consistent,
-  //    unlike /items/live which lags right after a write and caused the duplicates.
+  // Read existing slugs from the staged view (immediately consistent)
   const existingSlugs = new Set();
   let off = 0;
   while (true) {
@@ -68,21 +68,36 @@ export default async function handler(req, res) {
   let pushed = 0;
   let skipped = 0;
   let failed = 0;
+  let totalReviews = null;
 
   const stop = (done, message) =>
-    res.status(200).json({ version: VERSION, done, message, nextSkip: skip, pushed, skipped, failed });
+    res.status(200).json({ version: VERSION, done, message, nextSkip: skip, totalReviews, pushed, skipped, failed });
 
-  // 2. Walk reviews in small pages; push new ones, skip ones already present
   while (true) {
     if (timeUp()) return stop(false, `Time budget reached. Re-run with ?skip=${skip} to continue.`);
+
+    // STOP #1 — absolute safety cap on reviews fetched
+    if (skip >= HARD_CAP) {
+      return stop(true, `Safety cap of ${HARD_CAP} reviews reached — stopping to protect credits. If this place genuinely has more, re-run with a higher ?maxSkip= value.`);
+    }
 
     const oRes = await fetch(
       `https://api.app.outscraper.com/maps/reviews-v3?query=${encodeURIComponent(placeId)}&reviewsLimit=${PAGE}&skip=${skip}&sort=newest&async=false`,
       { headers: { 'X-API-KEY': process.env.OUTSCRAPER_API_KEY } }
     );
     const oData = await oRes.json();
-    const batch = oData.data?.[0]?.reviews_data || [];
+    const place = oData.data?.[0] || {};
+    const batch = place.reviews_data || [];
+
+    // Capture the place's own total-review count if Outscraper provides one
+    const reported = place.reviews ?? place.reviews_count ?? place.reviewsCount;
+    if (typeof reported === 'number') totalReviews = reported;
+
+    // STOP #2 — empty page
     if (!batch.length) return stop(true, 'No more reviews — complete.');
+
+    let newInPage = 0;
+    let presentInPage = 0;
 
     for (const review of batch) {
       if (timeUp()) return stop(false, `Time budget reached. Re-run with ?skip=${skip} to continue.`);
@@ -93,9 +108,10 @@ export default async function handler(req, res) {
       const slug = makeSlug(review);
       if (existingSlugs.has(slug)) {
         skipped++;
+        presentInPage++;
         continue;
       }
-      existingSlugs.add(slug); // guard against repeats within this same run
+      existingSlugs.add(slug);
 
       const payload = {
         fieldData: {
@@ -118,13 +134,22 @@ export default async function handler(req, res) {
           body: JSON.stringify(payload),
         }
       );
-      if (wRes.ok) pushed++;
-      else {
-        failed++;
-        existingSlugs.delete(slug); // let a failed one retry next run
-      }
+      if (wRes.ok) { pushed++; newInPage++; }
+      else { failed++; existingSlugs.delete(slug); }
     }
 
+    // STOP #3 — we've reached the place's reported total
+    if (totalReviews != null && skip >= totalReviews) {
+      return stop(true, `Reached the place's reported total of ${totalReviews} reviews — complete.`);
+    }
+
+    // STOP #4 — a full page with nothing new and everything already imported
+    // (means Outscraper is repeating reviews we already have = past the end)
+    if (newInPage === 0 && presentInPage > 0) {
+      return stop(true, 'Reached reviews already imported — complete.');
+    }
+
+    // STOP #5 — short page
     if (batch.length < PAGE) return stop(true, 'Reached end of reviews — complete.');
   }
 }
