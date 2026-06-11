@@ -2,7 +2,7 @@ export const config = {
   maxDuration: 60,
 };
 
-const VERSION = 'v6-single-fetch';
+const VERSION = 'v7-incremental';
 
 export default async function handler(req, res) {
   if (req.headers['authorization'] !== `Bearer ${process.env.CRON_SECRET}`) {
@@ -48,7 +48,7 @@ export default async function handler(req, res) {
 
   // 1. ONE fetch — no pagination, so no overlap and no runaway possible
   const oRes = await fetch(
-    `https://api.app.outscraper.com/maps/reviews-v3?query=${encodeURIComponent(placeId)}&reviewsLimit=${REVIEWS_LIMIT}&async=false`,
+    `https://api.app.outscraper.com/maps/reviews-v3?query=${encodeURIComponent(placeId)}&reviewsLimit=${REVIEWS_LIMIT}&sort=newest&async=false`,
     { headers: { 'X-API-KEY': process.env.OUTSCRAPER_API_KEY } }
   );
   const oData = await oRes.json();
