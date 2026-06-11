@@ -12,9 +12,10 @@ export default async function handler(req, res) {
   const collectionId = process.env.WEBFLOW_COLLECTION_ID;
 
   const startTime = Date.now();
-  const TIME_BUDGET_MS = 45000;
-  const REVIEWS_PER_PAGE = 50;
+  const TIME_BUDGET_MS = 45000;  // stop well before the 60s hard limit and report progress
+  const REVIEWS_PER_PAGE = 50;   // small page = fast Outscraper call (500 was timing out)
 
+  // Resume point. Pass ?skip=N to continue a backfill where a previous run stopped.
   let skip = parseInt(req.query.skip || '0', 10);
 
   function generateStars(rating) {
@@ -27,6 +28,7 @@ export default async function handler(req, res) {
     return Date.now() - startTime > TIME_BUDGET_MS;
   }
 
+  // 1. Read existing slugs once (paginated) so we don't create duplicates
   const existingSlugs = new Set();
   let wfOffset = 0;
   while (true) {
@@ -52,11 +54,12 @@ export default async function handler(req, res) {
   const stopHere = (done, msg) =>
     res.status(200).json({ done, message: msg, nextSkip: skip, pushed, skipped, results });
 
+  // 2. Walk reviews in small pages, pushing as we go, until we run out or run low on time
   while (true) {
     if (timeUp()) return stopHere(false, `Time budget reached. Re-run with ?skip=${skip} to continue.`);
 
     const outscraperRes = await fetch(
-      `https://api.app.outscraper.com/maps/reviews-v3?query=${encodeURIComponent(placeId)}&reviewsLimit=${REVIEWS_PER_PAGE}&skip=${skip}&async=false`,
+      `https://api.app.outscraper.com/maps/reviews-v3?query=${encodeURIComponent(placeId)}&reviewsLimit=${REVIEWS_PER_PAGE}&skip=${skip}&sort=newest&async=false`,
       { headers: { 'X-API-KEY': process.env.OUTSCRAPER_API_KEY } }
     );
     const outscraperData = await outscraperRes.json();
@@ -67,11 +70,15 @@ export default async function handler(req, res) {
     for (const review of batch) {
       if (timeUp()) return stopHere(false, `Time budget reached. Re-run with ?skip=${skip} to continue.`);
 
-      skip++;
+      skip++; // advance resume cursor for every review we consume
 
+      // No character filter — only skip reviews that have no text at all
       if (!review.review_text || !review.review_text.trim()) continue;
 
-      const slug = review.author_title.toLowerCase().replace(/[^a-z0-9]+/g, '-') + '-' + review.review_id;
+      const slug = (review.author_title + '-' + review.review_id)
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
       if (existingSlugs.has(slug)) {
         skipped++;
         continue;
@@ -106,6 +113,7 @@ export default async function handler(req, res) {
       results.push({ slug, status: webflowRes.status });
     }
 
+    // a short page means we've reached the end of the reviews
     if (batch.length < REVIEWS_PER_PAGE) return stopHere(true, 'Reached end of reviews — backfill complete.');
   }
 }
