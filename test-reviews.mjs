@@ -56,8 +56,10 @@ async function main() {
   }
 
   // 2. Same filter as production: no length limit, just keep reviews that have text
-  const filtered = reviews.filter(r => r.review_text && r.review_text.trim().length > 0);
-  console.log(`   → ${filtered.length} have text\n`);
+const filtered = reviews
+  .filter(r => r.review_text && r.review_text.trim().length > 0)
+  .slice(0, TEST_LIMIT);
+console.log(`   → testing with ${filtered.length} (capped at ${TEST_LIMIT})\n`);
 
   // 3. Pull existing slugs so we don't create duplicates (test reads first page only)
   const existingRes = await fetch(
