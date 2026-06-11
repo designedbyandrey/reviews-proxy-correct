@@ -2,7 +2,7 @@ export const config = {
   maxDuration: 60,
 };
 
-const VERSION = 'v7-incremental';
+const VERSION = 'v8-union-dedup';
 
 export default async function handler(req, res) {
   if (req.headers['authorization'] !== `Bearer ${process.env.CRON_SECRET}`) {
@@ -65,21 +65,25 @@ export default async function handler(req, res) {
     if (r.review_text && r.review_text.trim()) reviews.push(r);
   }
 
-  // 2. Read existing slugs (staged view, immediately consistent)
+  // 2. Read existing slugs from BOTH the staged and live views, then union them.
+  //    Live-created items don't always appear in the staged list, so reading only
+  //    one view caused missed matches and duplicates. Reading both is bulletproof.
   const existingSlugs = new Set();
-  let off = 0;
-  while (true) {
-    const r = await wf(
-      `https://api.webflow.com/v2/collections/${collectionId}/items?limit=100&offset=${off}`,
-      { headers: { Authorization: `Bearer ${webflowToken}` } }
-    );
-    const d = await r.json();
-    if (!r.ok) return res.status(502).json({ version: VERSION, error: 'Webflow read failed', status: r.status, response: d });
-    const items = d.items || [];
-    items.forEach((i) => existingSlugs.add(i.fieldData?.slug));
-    if (items.length < 100) break;
-    off += 100;
-    if (timeUp()) break;
+  for (const view of ['items', 'items/live']) {
+    let off = 0;
+    while (true) {
+      const r = await wf(
+        `https://api.webflow.com/v2/collections/${collectionId}/${view}?limit=100&offset=${off}`,
+        { headers: { Authorization: `Bearer ${webflowToken}` } }
+      );
+      const d = await r.json();
+      if (!r.ok) return res.status(502).json({ version: VERSION, error: `Webflow read failed (${view})`, status: r.status, response: d });
+      const items = d.items || [];
+      items.forEach((i) => existingSlugs.add(i.fieldData?.slug));
+      if (items.length < 100) break;
+      off += 100;
+      if (timeUp()) break;
+    }
   }
 
   // 3. Push the ones not already in Webflow
