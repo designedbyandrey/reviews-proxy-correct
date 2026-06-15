@@ -49,16 +49,18 @@ async function wf(url, options) {
 const BASE = `https://api.webflow.com/v2/collections/${WEBFLOW_COLLECTION_ID}/items`;
 const HEADERS = { Authorization: `Bearer ${WEBFLOW_API_TOKEN}`, 'Content-Type': 'application/json' };
 
-// 1. existing slugs (staged view)
+// 1. existing slugs from BOTH staged and live views (live-created items can be missing from staged)
 const existing = new Set();
-let off = 0;
-while (true) {
-  const r = await wf(`${BASE}?limit=100&offset=${off}`, { headers: HEADERS });
-  const d = await r.json();
-  if (!r.ok) { console.error('❌ Webflow read failed:', r.status, JSON.stringify(d)); process.exit(1); }
-  (d.items || []).forEach((i) => existing.add(i.fieldData?.slug));
-  if ((d.items || []).length < 100) break;
-  off += 100;
+for (const view of ['items', 'items/live']) {
+  let off = 0;
+  while (true) {
+    const r = await wf(`${BASE.replace(/\/items$/, '')}/${view}?limit=100&offset=${off}`, { headers: HEADERS });
+    const d = await r.json();
+    if (!r.ok) { console.error(`❌ Webflow read failed (${view}):`, r.status, JSON.stringify(d)); process.exit(1); }
+    (d.items || []).forEach((i) => existing.add(i.fieldData?.slug));
+    if ((d.items || []).length < 100) break;
+    off += 100;
+  }
 }
 console.log(`Reviews with text: ${reviews.length}.  Already in Webflow: ${existing.size}.`);
 
